@@ -1,7 +1,7 @@
 use std::num::NonZeroUsize;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard};
 use thread_local::ThreadLocal;
 
 pub struct Register<T> {
@@ -20,16 +20,17 @@ pub struct Register<T> {
 }
 
 impl<T> Register<T> {
-    pub fn new(init: T) -> Arc<Register<T>> {
+    pub fn new(init: T) -> Register<T> {
         let inner = Box::leak(Box::new(init));
         let atomic_ref = AtomicPtr::new(inner);
         let hazard_ptr = ThreadLocal::new();
         let drop_later = ThreadLocal::new();
-        Arc::new(Register {
+
+        Register {
             ptr: atomic_ref,
             hazard_ptr,
             drop_later,
-        })
+        }
     }
 
     pub fn write(&self, new_value: T) {
