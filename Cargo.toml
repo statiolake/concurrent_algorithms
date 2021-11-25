@@ -1,2 +1,2 @@
 [workspace]
-members = ["atomic_register"]
+members = ["register"]

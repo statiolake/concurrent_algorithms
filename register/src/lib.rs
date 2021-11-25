@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use thread_local::ThreadLocal;
 
-pub struct AtomicRegister<T> {
+pub struct Register<T> {
     ptr: AtomicPtr<T>,
 
     hazard_ptr: ThreadLocal<AtomicPtr<T>>,
@@ -19,13 +19,13 @@ pub struct AtomicRegister<T> {
     drop_later: ThreadLocal<Mutex<Vec<NonZeroUsize>>>,
 }
 
-impl<T> AtomicRegister<T> {
-    pub fn new(init: T) -> Arc<AtomicRegister<T>> {
+impl<T> Register<T> {
+    pub fn new(init: T) -> Arc<Register<T>> {
         let inner = Box::leak(Box::new(init));
         let atomic_ref = AtomicPtr::new(inner);
         let hazard_ptr = ThreadLocal::new();
         let drop_later = ThreadLocal::new();
-        Arc::new(AtomicRegister {
+        Arc::new(Register {
             ptr: atomic_ref,
             hazard_ptr,
             drop_later,
@@ -77,7 +77,7 @@ impl<T> AtomicRegister<T> {
     }
 }
 
-impl<T> AtomicRegister<T>
+impl<T> Register<T>
 where
     T: Clone,
 {
@@ -137,7 +137,7 @@ where
     }
 }
 
-impl<T> Drop for AtomicRegister<T> {
+impl<T> Drop for Register<T> {
     fn drop(&mut self) {
         // We need to drop the rest objects. That is the objects which couldn't be dropped because
         // of the protection by the hazard pointer when writing the new value to it.
@@ -181,18 +181,18 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use crate::AtomicRegister;
+    use crate::Register;
 
     #[test]
     fn sequencial_read() {
-        let reg = AtomicRegister::new(0);
+        let reg = Register::new(0);
         reg.write(10);
         assert_eq!(reg.read(), 10);
     }
 
     #[test]
     fn multi_thread_read() {
-        let reg = Arc::new(AtomicRegister::new(0));
+        let reg = Arc::new(Register::new(0));
         let reg1 = Arc::clone(&reg);
         let reg2 = Arc::clone(&reg);
 
@@ -220,7 +220,7 @@ mod tests {
     fn massive_writes() {
         const COUNT: usize = 10000000;
 
-        let reg = Arc::new(AtomicRegister::new(0));
+        let reg = Arc::new(Register::new(0));
         let reg1 = Arc::clone(&reg);
         let reg2 = Arc::clone(&reg);
 
