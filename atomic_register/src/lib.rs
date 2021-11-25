@@ -215,4 +215,38 @@ mod tests {
         let value = reg.read();
         assert!(value == 10 || value == 20);
     }
+
+    #[test]
+    fn massive_writes() {
+        const COUNT: usize = 10000000;
+
+        let reg = Arc::new(AtomicRegister::new(0));
+        let reg1 = Arc::clone(&reg);
+        let reg2 = Arc::clone(&reg);
+
+        let t1 = thread::spawn(move || {
+            for cnt in 1..=COUNT {
+                reg1.write(cnt)
+            }
+        });
+
+        let t2 = thread::spawn(move || {
+            let mut old = 0;
+            loop {
+                let curr = reg2.read();
+                assert!(curr >= old);
+                old = curr;
+
+                if curr == COUNT {
+                    break;
+                }
+            }
+        });
+
+        t1.join().unwrap();
+        t2.join().unwrap();
+
+        let value = reg.read();
+        assert_eq!(value, COUNT);
+    }
 }
