@@ -1,2 +1,6 @@
+# vim session files
+.undodir
+.vim-session
+
 /target
 Cargo.lock
