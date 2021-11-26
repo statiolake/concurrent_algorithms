@@ -1,5 +1,5 @@
 [package]
-name = "collect"
+name = "process_local"
 version = "0.1.0"
 edition = "2018"
 
@@ -7,5 +7,3 @@ edition = "2018"
 
 [dependencies]
 process = { version = "*", path = "../process" }
-process_local = { version = "*", path = "../process_local" }
-register = { version = "*", path = "../register" }

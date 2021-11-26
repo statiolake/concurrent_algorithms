@@ -1,69 +1,72 @@
+use process::{ProcessId, System, View};
 use register::Register;
-use thread_local::ThreadLocal;
 
 pub struct Collect<T> {
-    id: ThreadLocal<usize>,
-    regs: Vec<Register<(usize, T)>>,
+    regs: Box<[Register<T>]>,
 }
 
 impl<T: Clone> Collect<T> {
-    pub fn new(init: T, num_processes: usize) -> Collect<T> {
-        let id = ThreadLocal::new();
-        let regs = (0..num_processes)
-            .map(|id| Register::new((id, init.clone())))
-            .collect();
+    pub fn new(sys: &System, init: T) -> Collect<T> {
+        let regs = (0..sys.num_procs())
+            .map(|_| Register::new(sys, init.clone()))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
 
-        Collect { id, regs }
+        Collect { regs }
     }
 
-    pub fn collect(&self) -> Vec<T> {
-        (0..self.regs.len())
-            .map(|id| self.regs[id].read())
-            .map(|(_, v)| v)
-            .collect()
+    pub fn collect(&self, pid: ProcessId) -> View<T> {
+        let values: Vec<_> = (0..self.regs.len())
+            .map(|id| self.regs[id].read(pid))
+            .collect();
+        View::from_boxed_slice(values.into_boxed_slice())
     }
 }
 
 impl<T> Collect<T> {
-    pub fn store(&self, id: usize, new_value: T) {
-        // Check ID validity
-        if id >= self.regs.len() {
-            panic!("id {} is beyond the len {}", id, self.regs.len());
-        }
-        let prev_id = *self.id.get_or(|| id);
-        if prev_id != id {
-            panic!("prev_id: {}, id: {}; id is not consistent!", prev_id, id);
-        }
-
+    pub fn store(&self, pid: ProcessId, new_value: T) {
         // store value at position id
-        self.regs[id].write((id, new_value));
+        self.regs[pid.as_usize()].write(pid, new_value);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::thread;
+
+    use process::System;
 
     use crate::Collect;
 
     #[test]
     fn simple_collect() {
-        const NUM_PROCESSES: usize = 128;
-        let collect = Arc::new(Collect::new(0, NUM_PROCESSES));
+        let sys = System::with_procs(128);
+        let collect = Arc::new(Collect::new(&sys, 0));
 
         // False-positive clippy lint for thread handle
         // see: https://github.com/rust-lang/rust-clippy/issues/7207
         #[allow(clippy::needless_collect)]
-        let ths: Vec<_> = (0..NUM_PROCESSES)
-            .map(|id| {
+        let hs: Vec<_> = sys
+            .procs()
+            .iter()
+            .map(|proc| {
                 let collect = Arc::clone(&collect);
-                thread::spawn(move || {
-                    collect.store(id, id);
+                proc.run(move |pid| {
+                    collect.store(pid, pid.as_usize());
                 })
             })
             .collect();
-        ths.into_iter().for_each(|th| th.join().unwrap());
-        assert_eq!(collect.collect(), vec![0, 1]);
+        hs.into_iter().for_each(|h| h.join().unwrap());
+
+        let num_procs = sys.num_procs();
+        sys.procs()[0]
+            .run(move |pid| {
+                assert_eq!(
+                    collect.collect(pid).into_inner(),
+                    (0..num_procs).collect::<Vec<_>>().into_boxed_slice()
+                );
+            })
+            .join()
+            .unwrap();
     }
 }

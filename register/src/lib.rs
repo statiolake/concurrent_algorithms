@@ -1,13 +1,14 @@
+use process::{ProcessId, System};
+use process_local::ProcessLocal;
 use std::num::NonZeroUsize;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Mutex, MutexGuard};
-use thread_local::ThreadLocal;
 
 pub struct Register<T> {
     ptr: AtomicPtr<T>,
 
-    hazard_ptr: ThreadLocal<AtomicPtr<T>>,
+    hazard_ptr: ProcessLocal<AtomicPtr<T>>,
 
     // Here we use Mutex in order to enable mutation in each thread. Note that this is still lock
     // free, since the inner value won't seen from another thread except final Drop implementation
@@ -16,15 +17,15 @@ pub struct Register<T> {
     // The type of list element should be *mut T, but that's not allowed because *mut T is not Send.
     // In order to avoid this, we first cast it to usize. The dereference is always safe since no
     // other process drop the pointee.
-    drop_later: ThreadLocal<Mutex<Vec<NonZeroUsize>>>,
+    drop_later: ProcessLocal<Mutex<Vec<NonZeroUsize>>>,
 }
 
 impl<T> Register<T> {
-    pub fn new(init: T) -> Register<T> {
+    pub fn new(sys: &System, init: T) -> Register<T> {
         let inner = Box::leak(Box::new(init));
         let atomic_ref = AtomicPtr::new(inner);
-        let hazard_ptr = ThreadLocal::new();
-        let drop_later = ThreadLocal::new();
+        let hazard_ptr = ProcessLocal::new(sys, Default::default);
+        let drop_later = ProcessLocal::new(sys, Default::default);
 
         Register {
             ptr: atomic_ref,
@@ -33,7 +34,7 @@ impl<T> Register<T> {
         }
     }
 
-    pub fn write(&self, new_value: T) {
+    pub fn write(&self, pid: ProcessId, new_value: T) {
         let new_ptr = Box::leak(Box::new(new_value));
 
         // Write the new pointer to the atomic reference. new_ptr and old_ptr is always different,
@@ -41,18 +42,19 @@ impl<T> Register<T> {
         let old_ptr = self.ptr.swap(new_ptr, Ordering::SeqCst);
 
         // Register the old pointer to the list of pointers which should be dropped later.
-        self.drop_later_mut()
+        self.drop_later_mut(pid)
             .push(NonZeroUsize::new(old_ptr as _).expect("internal error: old_ptr was null"));
 
         // Drop the old values if it's no longer used.
-        self.drop_if_unused();
+        self.drop_if_unused(pid);
     }
 
-    fn drop_if_unused(&self) {
-        self.drop_later_mut().retain(|ptr| {
+    fn drop_if_unused(&self, pid: ProcessId) {
+        self.drop_later_mut(pid).retain(|ptr| {
             // Check if the ptr is in use
             let in_use = self
                 .hazard_ptr
+                .as_slice()
                 .iter()
                 .any(|hazptr| hazptr.load(Ordering::SeqCst) as usize == ptr.get());
 
@@ -70,9 +72,9 @@ impl<T> Register<T> {
         })
     }
 
-    fn drop_later_mut(&self) -> MutexGuard<Vec<NonZeroUsize>> {
+    fn drop_later_mut(&self, pid: ProcessId) -> MutexGuard<Vec<NonZeroUsize>> {
         self.drop_later
-            .get_or_default()
+            .get(pid)
             .try_lock()
             .expect("internal error: this lock should never fail")
     }
@@ -84,7 +86,7 @@ where
 {
     // You can't make it return &T: we need to ensure the backing value is alive during the reading
     // from backing pointer, but it can't.
-    pub fn read(&self) -> T {
+    pub fn read(&self, pid: ProcessId) -> T {
         // We need to keep trying until we get an access to the valid pointee.
         let mut ptr = null_mut();
         loop {
@@ -92,9 +94,7 @@ where
             let check_ptr = self.ptr.load(Ordering::SeqCst);
 
             // Claim the current ptr is in use.
-            self.hazard_ptr
-                .get_or_default()
-                .store(check_ptr, Ordering::SeqCst);
+            self.hazard_ptr.get(pid).store(check_ptr, Ordering::SeqCst);
 
             // Check the current pointer is the same with the previous one. If current ptr and
             // prev_ptr is the same, this ptr is reserved by this thread --- we set this ptr in the
@@ -123,11 +123,7 @@ where
         let value = unsafe { (&*ptr).clone() };
 
         // Finished using the pointer. Unregister the hazard pointer.
-        let old_ptr = self
-            .hazard_ptr
-            .get()
-            .expect("internal error: hazard_ptr must have the value")
-            .swap(null_mut(), Ordering::SeqCst);
+        let old_ptr = self.hazard_ptr.get(pid).swap(null_mut(), Ordering::SeqCst);
 
         assert_eq!(
             ptr, old_ptr,
@@ -147,6 +143,7 @@ impl<T> Drop for Register<T> {
         // the AtomicRegister.
         assert!(
             self.hazard_ptr
+                .as_slice()
                 .iter()
                 .all(|ptr| ptr.load(Ordering::SeqCst).is_null()),
             concat!(
@@ -157,6 +154,7 @@ impl<T> Drop for Register<T> {
 
         // Second, drop all left pointers.
         self.drop_later
+            .as_mut_slice()
             .iter_mut()
             .flat_map(|v| {
                 // This get_mut() should never fail, since no Mutex should be poisoned, but we can't
@@ -177,64 +175,83 @@ impl<T> Drop for Register<T> {
 
 #[cfg(test)]
 mod tests {
-
+    use crate::Register;
+    use process::System;
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
 
-    use crate::Register;
-
     #[test]
     fn sequencial_read() {
-        let reg = Register::new(0);
-        reg.write(10);
-        assert_eq!(reg.read(), 10);
+        let sys = System::with_procs(1);
+        let proc = &sys.procs()[0];
+        let reg = Register::new(&sys, 0);
+        proc.run(move |pid| {
+            reg.write(pid, 10);
+            assert_eq!(reg.read(pid), 10);
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]
     fn multi_thread_read() {
-        let reg = Arc::new(Register::new(0));
+        let sys = System::with_procs(2);
+        let proc1 = &sys.procs()[0];
+        let proc2 = &sys.procs()[1];
+
+        let reg = Arc::new(Register::new(&sys, 0));
         let reg1 = Arc::clone(&reg);
         let reg2 = Arc::clone(&reg);
 
-        let t1 = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(10));
-            reg1.write(10);
-            let value = reg1.read();
+        let h1 = proc1.run(move |pid| {
+            thread::sleep(Duration::from_millis(100));
+            reg1.write(pid, 10);
+            let value = reg1.read(pid);
             assert!(value == 10 || value == 20);
         });
-        let t2 = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(10));
-            reg2.write(20);
-            let value = reg2.read();
+        let h2 = proc2.run(move |pid| {
+            thread::sleep(Duration::from_millis(100));
+            reg2.write(pid, 20);
+            let value = reg2.read(pid);
             assert!(value == 10 || value == 20);
         });
 
-        t1.join().unwrap();
-        t2.join().unwrap();
+        h1.join().unwrap();
+        h2.join().unwrap();
 
-        let value = reg.read();
-        assert!(value == 10 || value == 20);
+        proc1
+            .run(move |pid| {
+                let value = reg.read(pid);
+                assert!(value == 10 || value == 20);
+            })
+            .join()
+            .unwrap();
     }
 
     #[test]
     fn massive_writes() {
         const COUNT: usize = 10000000;
 
-        let reg = Arc::new(Register::new(0));
+        let sys = System::with_procs(2);
+
+        let proc1 = &sys.procs()[0];
+        let proc2 = &sys.procs()[1];
+
+        let reg = Arc::new(Register::new(&sys, 0));
         let reg1 = Arc::clone(&reg);
         let reg2 = Arc::clone(&reg);
 
-        let t1 = thread::spawn(move || {
+        let h1 = proc1.run(move |pid| {
             for cnt in 1..=COUNT {
-                reg1.write(cnt)
+                reg1.write(pid, cnt)
             }
         });
 
-        let t2 = thread::spawn(move || {
+        let h2 = proc2.run(move |pid| {
             let mut old = 0;
             loop {
-                let curr = reg2.read();
+                let curr = reg2.read(pid);
                 assert!(curr >= old);
                 old = curr;
 
@@ -244,10 +261,15 @@ mod tests {
             }
         });
 
-        t1.join().unwrap();
-        t2.join().unwrap();
+        h1.join().unwrap();
+        h2.join().unwrap();
 
-        let value = reg.read();
-        assert_eq!(value, COUNT);
+        proc1
+            .run(move |pid| {
+                let value = reg.read(pid);
+                assert_eq!(value, COUNT);
+            })
+            .join()
+            .unwrap();
     }
 }
