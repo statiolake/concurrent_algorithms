@@ -1,2 +1,2 @@
 [workspace]
-members = ["process", "process_local", "register", "collect"]
+members = ["process", "process_local", "register", "collect", "snapshot"]

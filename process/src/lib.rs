@@ -1,4 +1,5 @@
 use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut, Index, IndexMut};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::thread::{self, JoinHandle};
 
@@ -110,6 +111,34 @@ impl<T> View<T> {
 
     pub fn into_inner(self) -> Box<[T]> {
         self.values
+    }
+}
+
+impl<T> Index<ProcessId> for View<T> {
+    type Output = T;
+
+    fn index(&self, index: ProcessId) -> &T {
+        self.get(index)
+    }
+}
+
+impl<T> IndexMut<ProcessId> for View<T> {
+    fn index_mut(&mut self, index: ProcessId) -> &mut T {
+        self.get_mut(index)
+    }
+}
+
+impl<T> Deref for View<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        &*self.values
+    }
+}
+
+impl<T> DerefMut for View<T> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        &mut *self.values
     }
 }
 
