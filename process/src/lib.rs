@@ -58,7 +58,7 @@ impl Process {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ProcessId {
     id: usize,
 
@@ -83,7 +83,7 @@ impl ProcessId {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct View<T> {
     values: Box<[T]>,
 }
